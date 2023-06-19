@@ -1,5 +1,5 @@
-import {Injectable, isDevMode, OnDestroy} from '@angular/core';
-import {BehaviorSubject, catchError, Observable, of, Subscription, switchAll, tap,} from 'rxjs';
+import {Injectable} from '@angular/core';
+import {fromEvent, map, merge, Observable, of, Subject, Subscription,} from 'rxjs';
 import {WebSocketSubject} from 'rxjs/internal/observable/dom/WebSocketSubject';
 import {devLog} from '../../shared/utils';
 import {retryBackoff} from "backoff-rxjs";
@@ -9,22 +9,15 @@ import {webSocket} from "rxjs/webSocket";
 @Injectable({
     providedIn: 'root',
 })
-export class WebsocketService implements OnDestroy {
+export class WebsocketService {
     private webSocket$: WebSocketSubject<any> | undefined;
     private webSocketSubscription: Subscription | undefined;
-    private messageSubject$: BehaviorSubject<any> = new BehaviorSubject([]);
-    private messages$: Observable<any> = this.messageSubject$.pipe(
-        switchAll(),
-        catchError((e) => {
-            if (isDevMode()) {
-                console.log('[Websocket] message error', e);
-            }
-            return of(e);
-        })
-    );
+    private messageSubject$: Subject<any> = new Subject();
+    isOffline: boolean = false;
+    networkStatus$: Subscription = Subscription.EMPTY;
 
-    ngOnDestroy(): void {
-        this.webSocketSubscription?.unsubscribe();
+    constructor() {
+        this.checkNetworkStatus();
     }
 
     connect(): void {
@@ -34,7 +27,7 @@ export class WebsocketService implements OnDestroy {
         }
 
         this.webSocketSubscription = this.webSocket$
-            .pipe(tap(devLog), switchAll(), retryBackoff(reconnectBackoffConfig))
+            .pipe(retryBackoff(reconnectBackoffConfig))
             .subscribe({
                 next: (msg: any) => this.messageSubject$.next(msg),
                 error: err => devLog(err)
@@ -42,7 +35,15 @@ export class WebsocketService implements OnDestroy {
     }
 
     sendMessage(msg: any): void {
+        if (this.isOffline) {
+            this.webSocketSubscription?.unsubscribe();
+            this.webSocket$?.unsubscribe()
+        }
         this.webSocket$?.next(msg)
+    }
+
+    public getMessages(): Observable<any> {
+        return this.messageSubject$.asObservable();
     }
 
     private getNewWebsocket(): WebSocketSubject<any> {
@@ -53,14 +54,31 @@ export class WebsocketService implements OnDestroy {
             },
             closeObserver: {
                 next: () => {
-                    devLog('[Websocket]: connection closed');
-                    this.webSocket$ = undefined
+                    devLog('[Websocket]: connection closed. Reconnecting.');
+                    this.reconnect();
                 }
             }
         })
     }
 
-    public getMessages(): Observable<any> {
-        return this.messages$;
+    private reconnect(): void {
+        this.webSocket$?.unsubscribe();
+        this.webSocketSubscription?.unsubscribe();
+        this.webSocket$ = undefined;
+        this.connect()
+    }
+
+    private checkNetworkStatus() {
+        this.isOffline = navigator.onLine;
+        this.networkStatus$ = merge(
+            of(null),
+            fromEvent(window, 'online'),
+            fromEvent(window, 'offline')
+        )
+            .pipe(map(() => navigator.onLine))
+            .subscribe(status => {
+                devLog('online', status);
+                this.isOffline = status;
+            });
     }
 }
